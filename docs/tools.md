@@ -302,6 +302,46 @@ separate decision. Diagnostic reads do not reconcile or resume a child.
 The fixed next-step line reminds callers to treat the excerpt as non-final
 evidence and await or re-delegate, not mark the task accepted.
 
+`usage: true` (status view only; ignored by `result` and `diagnostic` modes)
+appends the observed telemetry of the task's session from an in-memory,
+process-local registry. It records what the host actually reported — the
+observed effective model (v1: from the assistant message; v2: from the
+per-request model hook, including reasoning variant and request kind —
+the latest primary-loop request is preferred, and a title, compaction, or
+generate request, which may use another model, is shown labelled by kind
+only when no primary request was observed), the latest request's token
+counters (`input`, `output`, `reasoning`,
+`cache_read`, `cache_write`, plus `cost` where the host reports it),
+`observed_totals` (the sum over the distinct requests this process
+observed), and — on v2 — `session_totals`, the host's own cumulative
+usage snapshot, which is stored separately and never summed (it may
+include usage from before this process started observing). Sample
+granularity follows the host: one sample per completed assistant message
+on v1, one per provider-request step (`session.step.ended`, plus
+`session.step.failed` where the host attributes usage) on v2. `cost` is
+the host's computed estimate from model cost tables, not a provider
+invoice. Metric definitions and limits: every field is present only when
+the host reported a finite value — an absent field was never observed
+and is never rendered as zero; `observed_totals` is an observed-request
+sum, not exact billing, subscription-quota consumption, or the session's
+active context size, and provider token categories do not carry
+identical semantics across providers. Replayed events count once
+(dedupe by native identity — v1 message id, v2 envelope event id — with
+a content fallback on reduced hosts that can collapse identical
+consecutive steps); beyond 512 remembered fingerprints per session the
+oldest is evicted, so a replay of an evicted fingerprint counts again.
+The registry covers all sessions in the process (parents and children)
+keyed by session id, evicts with the session on `session.deleted`, and
+is bounded (256 sessions, least recently observed first). Attribution is
+per host session: a relaunch or revive that continues the same session
+keeps accumulating in `observed_totals`, while a continuation on a new
+session id starts fresh. It does not survive a host or
+plugin process restart — a restart gap renders as "none observed", never
+as stale or zeroed data. The read is a bounded map lookup: it generates
+nothing, wakes nothing, and mutates no lifecycle state. Nothing in the
+plugin gates, cancels, downgrades, or forks from these numbers; they are
+advisory input for the orchestrator's own judgement.
+
 `task_status`, `task_message`, `task_reply`, `task_cancel`,
 `task_revive`, and an explicit resume ID resolve a non-exact alias from the
 tracked job records first, else from the markers in one read of the parent's readable history,

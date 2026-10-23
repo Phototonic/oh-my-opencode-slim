@@ -318,7 +318,24 @@ not an optional-degradation path.
        `permission.replied` keeps raw-first delivery and additionally
        normalizes the native `data` payload into `properties`
        `{sessionID, requestID, reply}` so the v1 consumers can clear the
-       wait). V2 hosts publish durable `session.execution.started/
+       wait). The same raw events additionally feed a process-global usage
+       observer (`src/utils/usage-observer.ts`, the `task_status`
+       `usage: true` view): `session.step.ended` / `session.step.failed`
+       (where the host attributes usage) are per-request samples deduped
+       by the envelope event id (`evt_…`), while `session.usage.updated`
+       publishes the host's CUMULATIVE session totals and is stored as a
+       separately rendered snapshot, never summed; the observer skips the
+       adapter's synthesized `message.updated` echoes by their
+       `v2-usage:` id prefix, so each request counts once.
+       Foreign-location events (children moved to another directory) are
+       observed in the event pump before the task-owner forward, because
+       they never reach this location's main event hook. The v2
+       `session.model.request` hook registration records the observed
+       effective model/variant/kind per session (the primary-loop request
+       is preferred over title/compaction/generate) before running the v1
+       `chat.headers` bridge; when no `chat.headers` hook exists the
+       registration is observation-only and fail-soft, so missing telemetry
+       capability never fails setup. V2 hosts publish durable `session.execution.started/
       succeeded/failed/interrupted` and emit no busy/idle `session.status`
       and no `session.idle` on the event stream — the observed payloads
       always ride under `data` (verified live, 80-event capture). The

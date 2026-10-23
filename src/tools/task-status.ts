@@ -35,6 +35,11 @@ import {
   type RuntimeSessionStatusSnapshot,
   runtimeSessionStatus,
 } from '../utils/session-runtime-status';
+import {
+  formatUsageSummary,
+  getUsageObserver,
+  type UsageObserver,
+} from '../utils/usage-observer';
 import type { TaskActivityTracker } from './task-activity';
 import {
   observationFromSnapshot,
@@ -167,8 +172,10 @@ export function createTaskStatusTool(options: {
   resolveCanonicalTaskRef?: CanonicalTaskResolver;
   isDisposed?: () => boolean;
   readTimeoutMs?: number;
+  usageObserver?: UsageObserver;
 }): Record<'task_status', ToolDefinition> {
   const idParam = idParamFor(options.input);
+  const usageObserver = options.usageObserver ?? getUsageObserver();
   const gate =
     options.terminalGate ??
     createBackgroundJobTerminalGate({
@@ -190,6 +197,12 @@ export function createTaskStatusTool(options: {
         .optional()
         .describe(
           'Read a bounded, non-final excerpt for a tracked error, cancelled, or stopped task. Read-only; does not consume or acknowledge.',
+        ),
+      usage: z
+        .boolean()
+        .optional()
+        .describe(
+          "Append the session's observed model and token telemetry (advisory, process-local; not billing or context size).",
         ),
     },
     async execute(args, toolContext) {
@@ -256,11 +269,16 @@ export function createTaskStatusTool(options: {
         // plugin restart emptied the in-memory board): verify ownership
         // like the result mode's untracked path, then report observed
         // evidence. The task is never registered, prompted, or aborted.
-        return reportUntrackedTaskStatus(options, {
+        const untracked = await reportUntrackedTaskStatus(options, {
           requested,
           identity,
           parentSessionID,
         });
+        if (args.usage !== true) return untracked;
+        // Observation may still hold data when only the board record was
+        // evicted in-process (retention trim); after a restart this
+        // renders the explicit none-observed line.
+        return `${untracked}\n${formatUsageSummary(usageObserver.describeSession(identity)).join('\n')}`;
       }
       const taskID = job.taskID;
 
@@ -319,12 +337,14 @@ export function createTaskStatusTool(options: {
           terminalProbe.gateResult?.kind === 'committed' &&
           terminalProbe.record?.generation === current.generation
         ) {
-          return committedStatusOutput(
+          const committed = committedStatusOutput(
             terminalProbe.record,
             lastActivityAt,
             now,
             activity.source,
           );
+          if (args.usage !== true) return committed;
+          return `${committed}\n${formatUsageSummary(usageObserver.describeSession(taskID)).join('\n')}`;
         }
       }
 
@@ -349,6 +369,14 @@ export function createTaskStatusTool(options: {
           details.push(`last_status_error: ${report.lastStatusError}`);
         }
         details.push(`next: ${UNCONFIRMED_NEXT}`);
+      }
+      if (args.usage === true) {
+        // Advisory observation read: in-memory map lookup keyed by the
+        // task's child session id (taskID); no host calls, no mutation,
+        // nothing generated. Unobserved values render as unavailable.
+        details.push(
+          ...formatUsageSummary(usageObserver.describeSession(taskID)),
+        );
       }
       if (
         waits.length === 0 &&

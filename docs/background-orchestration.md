@@ -734,6 +734,15 @@ error, or cancelled record once the parent demonstrably moved past the terminal
 report. The board is never injected on any host: `backgroundJobs.boardInjection`
 was removed, and `task_status` is always the pull channel.
 
+`task_status` with `usage: true` also pulls the observed model and token
+telemetry of the task's session from an in-memory, process-local registry fed
+by host events — per-request samples plus, on v2, the host's own cumulative
+usage snapshot — and the per-request model hook. It is advisory only —
+observed-request sums, not billing, quota, or active context — with
+unobserved fields rendered as unavailable rather than zero, and it drives no
+lifecycle decision. Definitions and limits are documented with the
+`task_status` contract in [Tools](tools.md).
+
 On v1, child-input wakes wait 250 ms before notifying the parent. v2 sends no
 child-input wake: open asks surface only through `task_status`. Per-kind policy applies: by default only question asks wake the
 parent; permission asks do not (#1504). Built-in subagents no longer receive

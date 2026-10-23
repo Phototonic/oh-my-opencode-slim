@@ -23,6 +23,7 @@ Centralized utilities and shared abstractions used across the oh-my-opencode-sli
 - **BackgroundJobSupervisor** (`background-job-supervisor.ts`): One-shot wall-clock deadline supervision with timer/generation/abort mechanics
 - **BackgroundTaskConcurrency** (`background-task-concurrency.ts`): Process-local admission scheduler for native background task launches with model/provider capacity tracking
 - **Runtime Session Status** (`session-runtime-status.ts`): Reads and validates the in-process OpenCode session-status map with absent/unknown distinction; reduces the `session.get` outcome/idleAt projection to terminal/pending/unknown verdicts for v2 recovery triage (`hostRoundStateOf`), and classifies one live session for a probe (`classifyLiveSession`: `running`/`idle`/an attributable host terminal outcome read through a bounded, timer-injectable shared host read on hosts without the map).
+- **Usage Observer** (`usage-observer.ts`): Process-local, bounded, observation-only registry of the observed model identity and per-request token/cost telemetry per session, fed by host events (v1 `message.updated`; raw v2 `session.step.ended/failed` samples deduped by envelope id, the cumulative `session.usage.updated` kept as a separate host snapshot, and the v2 `session.model.request` hook). Read on demand by `task_status` `usage: true`; advisory, never a gate, never rendered into a prompt.
 - **Session Info Read** (`session-info-read.ts`): Single-flight raw `session.get` per client session domain and task id, shared by the probe, the ownership gate, and the gate's rehydration observer; a consumer deadline releases only its waiter, never the underlying read, and a differing identity is refused while the read is open (`raceEvidenceDeadline` bounds waits deterministically).
 - **Session Metadata** (`session-metadata.ts`): Bounded session → agent/directory map with LRU eviction and active orchestrator protection
 - **Session Selection** (`session-selection.ts`): Session selection resolution with provenance tracking (host-persisted, observed-external, unknown)
@@ -168,6 +169,7 @@ Session metadata, the opencode client accessor, and the type-only call-shape con
 | `session.ts` | Session timeout, abort, and model-reference utilities |
 | `session-metadata.ts` | Bounded session → agent/directory store |
 | `session-runtime-status.ts` | Bounded live session-status map reads; on-demand host round-state verdicts from the session info projection, with transcript text bound to the host idle |
+| `usage-observer.ts` | Bounded in-memory observed model/usage telemetry per session for the `task_status` usage view (advisory; host snapshots never summed) |
 | `session-selection.ts` | Session selection resolution with provenance |
 | `child-transcript.ts` | Child session transcript evidence extraction; v1/startup idle classification, on-demand v2 binding of latest input and assistant text to the host idle (malformed entries fail closed) |
 | `jsdom.ts` | JSDOM runtime detection without prerequisite |

@@ -185,6 +185,7 @@ import {
   looksLikeMainChatRequest,
 } from './utils/system-collapse';
 import { createTuiReusableProjection } from './utils/tui-reusable-projection';
+import { getUsageObserver } from './utils/usage-observer';
 import { createV2Setup } from './v2';
 import { parseModelRef } from './v2/adapters';
 import {
@@ -2642,6 +2643,9 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       // their task owner. Unresolved events fall through (fail-open).
       eventDirectoryScope?.note(input.event);
       if (eventDirectoryScope?.isForeign(input.event)) {
+        // Moved children on v1 are observed here; the v2 pump observes its
+        // own foreign branch before forwarding (never both for one event).
+        getUsageObserver().observeEvent(input.event);
         await observeForeignTaskEvent(input);
         return;
       }
@@ -2682,6 +2686,11 @@ export const OhMyOpenCodeLite: Plugin = async (ctx) => {
       if (!runtime.disabledHooks.has('cache-monitor')) {
         await cacheMonitor.event(input);
       }
+      // Observed usage/model telemetry (task_status usage view): O(1)
+      // fail-soft parse; skips everything it does not recognize. Parses
+      // v1 message.updated and raw v2 usage events; the adapter's
+      // v2-usage synthetic echoes are skipped inside the observer.
+      getUsageObserver().observeEvent(input.event);
       const rawStatus = event.properties?.status;
       const statusType =
         typeof rawStatus === 'string'

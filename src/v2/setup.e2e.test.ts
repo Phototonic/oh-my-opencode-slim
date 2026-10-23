@@ -32,6 +32,7 @@ import { RuntimeConfig } from '../config/runtime';
 import { MarketplaceStore } from '../marketplace/store';
 import { createEventDirectoryScope } from '../utils/event-directory-scope';
 import { flushLoggerForTesting } from '../utils/logger';
+import { getUsageObserver } from '../utils/usage-observer';
 import { compilePermissionPolicy } from './permissions';
 import { createV2Setup } from './setup';
 import type { V2Context, V2PermissionRule } from './types';
@@ -60,6 +61,11 @@ interface MockCalls {
     | undefined;
   contextHookCb:
     | ((event: Record<string, unknown>) => Promise<void>)
+    | undefined;
+  modelRequestHookCb:
+    | ((
+        event: Record<string, unknown> & { headers: Record<string, string> },
+      ) => Promise<void>)
     | undefined;
   promptHookCb:
     | ((event: {
@@ -155,6 +161,7 @@ function makeMockV2Context(
     toolBeforeCb: undefined,
     toolAfterCb: undefined,
     contextHookCb: undefined,
+    modelRequestHookCb: undefined,
     promptHookCb: undefined,
     disposed: [],
     rebuildSkills: () => {
@@ -288,7 +295,7 @@ function makeMockV2Context(
         agent: 'orchestrator',
       }),
       hook: async (
-        name: 'context' | 'prompt',
+        name: 'context' | 'prompt' | 'model.request',
         cb: (event: never) => Promise<void>,
       ) => {
         calls.hooks.push(`session:${name}`);
@@ -296,6 +303,9 @@ function makeMockV2Context(
           calls.contextHookCb = cb as unknown as MockCalls['contextHookCb'];
         } else if (name === 'prompt') {
           calls.promptHookCb = cb as unknown as MockCalls['promptHookCb'];
+        } else if (name === 'model.request') {
+          calls.modelRequestHookCb =
+            cb as unknown as MockCalls['modelRequestHookCb'];
         }
         return reg(`session.hook:${name}`);
       },
@@ -3735,7 +3745,7 @@ describe('createV2Setup e2e', () => {
     expect(logText).not.toContain('[v2] v1 dispose failed');
   }, 20_000);
 
-  test('disabled_hooks chat-headers skips the model.request bridge registration', async () => {
+  test('disabled_hooks chat-headers keeps model.request observation-only', async () => {
     await Bun.write(
       path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
       JSON.stringify({
@@ -3746,17 +3756,36 @@ describe('createV2Setup e2e', () => {
     const { ctx, calls } = makeMockV2Context(projectDir);
     const cleanup = await createV2Setup()(ctx);
 
-    // The v1 chat.headers key is absent, so the v2 bridge skips both the
-    // marker observer and the model.request registration; the rest of the
-    // session hooks still register.
-    expect(calls.hooks).not.toContain('session:model.request');
+    // The v1 chat.headers key is absent, so the marker observer and the
+    // header bridge are skipped — but the model.request registration
+    // remains for usage observation (read-only; the handler must never
+    // stamp headers without the bridge). The rest of the session hooks
+    // still register.
+    expect(calls.hooks).toContain('session:model.request');
     expect(calls.hooks).toContain('session:context');
     expect(calls.hooks).toContain('session:prompt');
+    expect(calls.modelRequestHookCb).toBeFunction();
+
+    // Firing a Copilot primary request records the observation and leaves
+    // the mutable headers record untouched.
+    const headers: Record<string, string> = {};
+    await calls.modelRequestHookCb?.({
+      sessionID: 'ses_usage_e2e_observed',
+      model: { id: 'gpt-5', providerID: 'github-copilot' },
+      kind: 'primary',
+      headers,
+    });
+    expect(headers).toEqual({});
+    expect(
+      getUsageObserver().describeSession('ses_usage_e2e_observed')
+        ?.lastModelRequest?.modelID,
+    ).toBe('gpt-5');
 
     await cleanup();
 
     // Control: the default config registers the model.request bridge, so
-    // the absence above is the gate and not a dead registration path.
+    // the observation-only path above is the gate and not a dead
+    // registration path.
     await Bun.write(
       path.join(projectDir, '.opencode', 'oh-my-opencode-slim.json'),
       JSON.stringify({ companion: { enabled: false } }),

@@ -114,6 +114,8 @@ Each tool is implemented as a factory function that returns a `ToolDefinition` r
 1. Agent invokes task_status
    ├─> Resolves task_id to a BackgroundJobBoard entry
    ├─> Reads the bounded live session-status snapshot (session-runtime-status)
+   ├─> With usage: true, appends the usage observer's per-session summary
+   │   (usage-observer; advisory in-memory read, no host call, no mutation)
    ├─> On the uncertain branch (plain and result:true) one classifyLiveSession probe feeds an attributable host outcome through the terminal gate's observe/reconcile (interrupted → stopped family, never completed); unknown-handle errors append the parent's last 5 `recent:` handles; unattributable evidence keeps `running (unconfirmed)` with push-not-poll guidance
    ├─> summarizeTaskStatus() (task-policy.ts) prefers the live-confirmed host
    │   status; board state is only reported with explicit uncertainty
@@ -184,6 +186,7 @@ Each tool is implemented as a factory function that returns a `ToolDefinition` r
 | `@opencode-ai/plugin` | Tool schema and execution framework |
 | `BackgroundJobBoard` (`src/utils/`) | Background task tracking and cleanup |
 | `Session Runtime Status` (`src/utils/session-runtime-status.ts`) | Bounded live session-status reads for `task_status` |
+| `Usage Observer` (`src/utils/usage-observer.ts`) | Observed model/usage telemetry for `task_status` `usage: true` |
 | `Config System` (`src/config/`) | ACP agent configurations and presets |
 | `TUI State` (`src/tui-state.ts`) | Preset visualization in terminal UI |
 | `AST-grep CLI` | Pattern matching and transformation engine |

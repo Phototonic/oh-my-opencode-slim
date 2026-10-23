@@ -61,6 +61,7 @@ import { isRecord } from '../utils/guards';
 import { INTERNAL_INITIATOR_METADATA_KEY } from '../utils/internal-initiator';
 import { initLogger, log } from '../utils/logger';
 import { OperationTimeoutError, withTimeout } from '../utils/session';
+import { getUsageObserver } from '../utils/usage-observer';
 import {
   adaptTool,
   applyAgentToDraft,
@@ -3024,13 +3025,39 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
         // HTTP headers; registered unconditionally when the v1
         // hook exists — a failure fails setup rather than silently skipping
         // the Copilot initiator header).
+        //
+        // The handler first records the observed effective model/variant/
+        // kind for the usage observer (read-only; the observation half
+        // never touches `headers`). Without a v1 chat.headers hook the
+        // registration is observation-only and fail-soft — advisory
+        // telemetry must not fail setup.
+        const chatHeadersBridgeHandler = chatHeadersHook
+          ? createChatHeadersBridge(chatHeaderStates)
+          : undefined;
+        const modelRequestHandler = async (
+          event: V2SessionModelRequestEvent,
+        ): Promise<void> => {
+          getUsageObserver().recordModelRequest(event);
+          if (chatHeadersBridgeHandler) await chatHeadersBridgeHandler(event);
+        };
         if (chatHeadersHook) {
           const headerReg = await ctx.session.hook(
             'model.request',
-            createChatHeadersBridge(chatHeaderStates),
+            modelRequestHandler,
           );
           disposers.push(() => headerReg.dispose());
           log('[v2] chat.headers bridge registered (session.model.request)');
+        } else {
+          try {
+            const obsReg = await ctx.session.hook(
+              'model.request',
+              modelRequestHandler,
+            );
+            disposers.push(() => obsReg.dispose());
+            log('[v2] usage observation registered (session.model.request)');
+          } catch (err) {
+            log('[v2] usage observation registration failed', String(err));
+          }
         }
 
         // v2 native compaction hook: strip the plugin's tagged
@@ -3397,6 +3424,11 @@ export function createV2Setup(): (ctx: V2Context) => Promise<V2Cleanup> {
                       // Moved children retain their task owner in the parent's
                       // location. Forward observation only, not permission or
                       // profile handling from this foreign location.
+                      // Usage observation is process-global and keyed by
+                      // session id: foreign-location children are observed
+                      // here because their events never reach this
+                      // location's main event hook.
+                      getUsageObserver().observeEvent(next.value);
                       const foreignTaskEvent = v1Hooks['v2.foreignTaskEvent'] as
                         | ((input: { event: unknown }) => Promise<void>)
                         | undefined;

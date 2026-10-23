@@ -10,6 +10,10 @@ import {
   type BackgroundJobTerminalGate,
   createBackgroundJobTerminalGate,
 } from '../utils/background-job-terminal-gate';
+import {
+  createUsageObserver,
+  type UsageObserver,
+} from '../utils/usage-observer';
 import { buildPluginInput } from '../v2/client-shim';
 import { createCancelTaskTool } from './cancel-task';
 import { TaskActivityTracker } from './task-activity';
@@ -29,6 +33,7 @@ function makeTool(options: {
   statusTimeoutMs?: number;
   readTimeoutMs?: number;
   hostFlavor?: string;
+  usageObserver?: UsageObserver;
   resolveCanonicalTaskRef?: (
     parentSessionID: string,
     requested: string,
@@ -55,6 +60,7 @@ function makeTool(options: {
     statusTimeoutMs: options.statusTimeoutMs,
     readTimeoutMs: options.readTimeoutMs,
     resolveCanonicalTaskRef: options.resolveCanonicalTaskRef,
+    usageObserver: options.usageObserver,
   });
 }
 
@@ -229,6 +235,12 @@ describe('task_status', () => {
     expect(
       new TextEncoder().encode(description).byteLength,
     ).toBeLessThanOrEqual(135);
+    // The usage view follows the same convention: no flag prose in the
+    // tool description (frozen prompt bytes), one concise parameter line.
+    expect(h.tool.description).not.toContain('usage: true');
+    const usage = h.tool.args.usage.description ?? '';
+    expect(usage).toContain('advisory');
+    expect(new TextEncoder().encode(usage).byteLength).toBeLessThanOrEqual(135);
   });
 
   test.each([
@@ -2011,5 +2023,245 @@ describe('task_status unknown-handle enumeration', () => {
       unknownOutput.replace('state: unknown', 'state: running'),
     );
     expect(String(changed.output)).not.toContain(LOOP_GUARD_WARNING);
+  });
+});
+
+describe('task_status usage view', () => {
+  function busyChildClient() {
+    return {
+      session: {
+        status: mock(async () => ({
+          data: { ses_child1: { type: 'busy' } },
+        })),
+      },
+    };
+  }
+
+  function observerWithChildData(): UsageObserver {
+    const observer = createUsageObserver();
+    observer.recordModelRequest({
+      sessionID: 'ses_child1',
+      model: { id: 'glm-4.7', providerID: 'zai-coding-plan', variant: 'think' },
+      kind: 'primary',
+    });
+    observer.observeEvent({
+      type: 'session.step.ended',
+      id: 'evt_step_1',
+      created: 5_000,
+      data: {
+        sessionID: 'ses_child1',
+        assistantMessageID: 'msg_1',
+        tokens: {
+          input: 12_000,
+          output: 900,
+          cache: { read: 40_000, write: 300 },
+        },
+        cost: 0.02,
+      },
+    });
+    observer.observeEvent({
+      type: 'session.usage.updated',
+      id: 'evt_usage_1',
+      created: 5_100,
+      data: {
+        sessionID: 'ses_child1',
+        tokens: {
+          input: 12_000,
+          cache: { read: 40_000, write: 300 },
+        },
+        cost: 0.02,
+      },
+    });
+    return observer;
+  }
+
+  test('usage: true appends observed telemetry; default output stays lean', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 0,
+    });
+    client = busyChildClient();
+    const { task_status } = makeTool({
+      board,
+      now: () => 120_000,
+      usageObserver: observerWithChildData(),
+    });
+
+    const plain = await task_status.execute({ task_id: 'ses_child1' }, {
+      sessionID: 'parent-1',
+    } as never);
+    expect(plain).not.toContain('observed_usage');
+
+    const withUsage = await task_status.execute(
+      { task_id: 'ses_child1', usage: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(withUsage).toContain('observed_usage: advisory');
+    expect(withUsage).toContain(
+      'observed_model: zai-coding-plan/glm-4.7, variant: think, kind: primary',
+    );
+    expect(withUsage).toContain(
+      'latest_request: input=12000 output=900 cache_read=40000 cache_write=300 cost=0.02',
+    );
+    expect(withUsage).toContain('1 observed request');
+    expect(withUsage).toContain('observed_totals');
+    expect(withUsage).toContain('session_totals (host snapshot');
+  });
+
+  test('usage view with no observation renders the explicit none line', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 0,
+    });
+    client = busyChildClient();
+    const { task_status } = makeTool({
+      board,
+      now: () => 120_000,
+      usageObserver: createUsageObserver(),
+    });
+    const output = await task_status.execute(
+      { task_id: 'ses_child1', usage: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain(
+      'observed_usage: none observed for this session in this process',
+    );
+    expect(output).not.toContain('observed_totals');
+  });
+
+  test('usage view never leaks another session\u2019s counters', async () => {
+    const board = new BackgroundJobBoard();
+    board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'fixer',
+      now: 0,
+    });
+    client = busyChildClient();
+    const observer = createUsageObserver();
+    // Sibling child and parent traffic must not appear in child1's view.
+    observer.observeEvent({
+      type: 'session.usage.updated',
+      data: { sessionID: 'ses_child2', tokens: { input: 999_999 } },
+    });
+    observer.observeEvent({
+      type: 'message.updated',
+      properties: {
+        info: {
+          id: 'msg_parent',
+          role: 'assistant',
+          sessionID: 'parent-1',
+          modelID: 'parent-model',
+          providerID: 'parent-provider',
+          time: { completed: 1 },
+          tokens: { input: 888_888, cache: { read: 1, write: 1 } },
+        },
+      },
+    });
+    const { task_status } = makeTool({
+      board,
+      now: () => 120_000,
+      usageObserver: observer,
+    });
+    const output = await task_status.execute(
+      { task_id: 'ses_child1', usage: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain('observed_usage: none observed');
+    expect(output).not.toContain('999999');
+    expect(output).not.toContain('888888');
+    expect(output).not.toContain('parent-model');
+  });
+
+  test('result mode stays a pure final-text read regardless of usage flag', async () => {
+    const board = new BackgroundJobBoard();
+    const run = board.registerLaunch({
+      taskID: 'ses_child1',
+      parentSessionID: 'parent-1',
+      agent: 'explorer',
+      now: 0,
+    });
+    const input = {
+      directory: '/tmp',
+      client: {
+        session: {
+          get: mock(async () => ({ data: { parentID: 'parent-1' } })),
+          status: mock(async () => ({ data: {} })),
+          messages: mock(async () => ({
+            data: [
+              {
+                info: {
+                  role: 'assistant',
+                  finish: 'stop',
+                  time: { completed: 10 },
+                },
+                parts: [{ type: 'text', text: 'final findings' }],
+              },
+            ],
+          })),
+        },
+      },
+    } as never;
+    const gate = createBackgroundJobTerminalGate({
+      backgroundJobBoard: board,
+      input,
+      graceMs: 0,
+      now: () => 20,
+    });
+    statusGates.push(gate);
+    const { task_status } = createTaskStatusTool({
+      input,
+      backgroundJobBoard: board,
+      terminalGate: gate,
+      usageObserver: observerWithChildData(),
+    });
+    await gate.reconcile(run);
+    expect(board.get('ses_child1')?.state).toBe('completed');
+    const output = await task_status.execute(
+      { task_id: 'ses_child1', result: true, usage: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toBe('final findings');
+    expect(output).not.toContain('observed_usage');
+  });
+
+  test('usage view also serves an untracked session the board lost', async () => {
+    const board = new BackgroundJobBoard();
+    client = {
+      session: {
+        get: mock(async () => ({ data: { parentID: 'parent-1' } })),
+        status: mock(async () => ({ data: {} })),
+        messages: mock(async () => ({
+          data: [
+            {
+              info: {
+                role: 'assistant',
+                finish: 'stop',
+                time: { completed: 10 },
+              },
+              parts: [{ type: 'text', text: 'done' }],
+            },
+          ],
+        })),
+      },
+    };
+    const { task_status } = makeTool({
+      board,
+      now: () => 120_000,
+      usageObserver: observerWithChildData(),
+    });
+    const output = await task_status.execute(
+      { task_id: 'ses_child1', usage: true },
+      { sessionID: 'parent-1' } as never,
+    );
+    expect(output).toContain('board: untracked');
+    expect(output).toContain('observed_usage: advisory');
+    expect(output).toContain('observed_model: zai-coding-plan/glm-4.7');
   });
 });
